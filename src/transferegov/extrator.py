@@ -29,6 +29,17 @@ class ExtratorPMMG:
             },
         )
 
+    def buscar_finalidades(
+        self,
+        id_executor: int,
+    ) -> list[dict]:
+        return self.api.consultar_paginado(
+            "finalidade_especiais",
+            filtros={
+                "id_executor": id_executor,
+            },
+        )
+
     # ==================================================
     # PLANO DE AÇÃO
     # ==================================================
@@ -49,6 +60,57 @@ class ExtratorPMMG:
 
         return dados[0]
 
+    def buscar_historico_plano_acao(
+        self,
+        id_plano_acao: int,
+    ) -> list[dict]:
+        return self.api.consultar_paginado(
+            "planos_acao_historico_especiais",
+            filtros={
+                "id_plano_acao": id_plano_acao,
+            },
+        )
+
+    # ==================================================
+    # BENEFICIÁRIO
+    # ==================================================
+
+    def buscar_beneficiario(
+        self,
+        id_beneficiario: int,
+    ) -> dict | None:
+        dados = self.api.consultar_paginado(
+            "beneficiarios_especiais",
+            filtros={
+                "id_beneficiario": id_beneficiario,
+            },
+        )
+
+        if not dados:
+            return None
+
+        return dados[0]
+
+    # ==================================================
+    # PROGRAMA
+    # ==================================================
+
+    def buscar_programa(
+        self,
+        id_programa: int,
+    ) -> dict | None:
+        dados = self.api.consultar_paginado(
+            "programas_especiais",
+            filtros={
+                "id_programa": id_programa,
+            },
+        )
+
+        if not dados:
+            return None
+
+        return dados[0]
+
     # ==================================================
     # PLANO DE TRABALHO
     # ==================================================
@@ -61,6 +123,17 @@ class ExtratorPMMG:
             "planos_trabalho_especiais",
             filtros={
                 "id_plano_acao": id_plano_acao,
+            },
+        )
+
+    def buscar_historico_plano_trabalho(
+        self,
+        id_plano_trabalho: int,
+    ) -> list[dict]:
+        return self.api.consultar_paginado(
+            "planos_trabalho_historico",
+            filtros={
+                "id_plano_trabalho": id_plano_trabalho,
             },
         )
 
@@ -195,9 +268,7 @@ class ExtratorPMMG:
         return self.api.consultar_paginado(
             "planos_trabalho_analises_especiais",
             filtros={
-                "id_plano_trabalho": (
-                    id_plano_trabalho
-                ),
+                "id_plano_trabalho": id_plano_trabalho,
             },
         )
 
@@ -224,9 +295,7 @@ class ExtratorPMMG:
         return self.api.consultar_paginado(
             "orgaos_analises_pendentes_especiais",
             filtros={
-                "id_plano_trabalho": (
-                    id_plano_trabalho
-                ),
+                "id_plano_trabalho": id_plano_trabalho,
             },
         )
 
@@ -242,12 +311,10 @@ class ExtratorPMMG:
         valor_padrao: Any = None,
     ) -> tuple[Any, dict | None]:
         """
-        Executa uma etapa de forma isolada.
+        Executa uma etapa isoladamente.
 
-        Em caso de erro:
-        - registra a falha no log;
-        - retorna o valor padrão;
-        - preserva os demais dados do plano.
+        Uma falha em um endpoint secundário não
+        interrompe a extração completa do plano.
         """
 
         try:
@@ -271,12 +338,177 @@ class ExtratorPMMG:
                 erro,
             )
 
-            falha = {
-                "etapa": nome_etapa,
-                "erro": str(erro),
-            }
+            return (
+                valor_padrao,
+                {
+                    "etapa": nome_etapa,
+                    "erro": str(erro),
+                },
+            )
 
-            return valor_padrao, falha
+    # ==================================================
+    # ENRIQUECIMENTO - EXECUTOR
+    # ==================================================
+
+    def enriquecer_executor(
+        self,
+        executor: dict,
+        erros: list[dict],
+    ) -> dict:
+        executor_enriquecido = dict(executor)
+
+        id_executor = executor.get(
+            "id_executor"
+        )
+
+        if id_executor is None:
+            executor_enriquecido[
+                "finalidades"
+            ] = []
+
+            return executor_enriquecido
+
+        finalidades, falha = (
+            self.executar_etapa(
+                "finalidades",
+                self.buscar_finalidades,
+                id_executor,
+                valor_padrao=[],
+            )
+        )
+
+        if falha:
+            falha[
+                "id_executor"
+            ] = id_executor
+
+            erros.append(falha)
+
+        executor_enriquecido[
+            "finalidades"
+        ] = finalidades
+
+        return executor_enriquecido
+
+    # ==================================================
+    # ENRIQUECIMENTO - PLANO DE AÇÃO
+    # ==================================================
+
+    def enriquecer_plano_acao(
+        self,
+        plano_acao: dict | None,
+        erros: list[dict],
+    ) -> dict | None:
+        if plano_acao is None:
+            return None
+
+        plano_enriquecido = dict(
+            plano_acao
+        )
+
+        id_plano_acao = plano_acao.get(
+            "id_plano_acao"
+        )
+
+        # ----------------------------------------------
+        # Histórico do Plano de Ação
+        # ----------------------------------------------
+
+        if id_plano_acao is not None:
+            historico, falha = (
+                self.executar_etapa(
+                    "historico_plano_acao",
+                    self.buscar_historico_plano_acao,
+                    id_plano_acao,
+                    valor_padrao=[],
+                )
+            )
+
+            if falha:
+                falha[
+                    "id_plano_acao"
+                ] = id_plano_acao
+
+                erros.append(falha)
+
+            plano_enriquecido[
+                "historico"
+            ] = historico
+
+        else:
+            plano_enriquecido[
+                "historico"
+            ] = []
+
+        # ----------------------------------------------
+        # Beneficiário
+        # ----------------------------------------------
+
+        id_beneficiario = plano_acao.get(
+            "id_beneficiario"
+        )
+
+        if id_beneficiario is not None:
+            beneficiario, falha = (
+                self.executar_etapa(
+                    "beneficiario",
+                    self.buscar_beneficiario,
+                    id_beneficiario,
+                    valor_padrao=None,
+                )
+            )
+
+            if falha:
+                falha[
+                    "id_beneficiario"
+                ] = id_beneficiario
+
+                erros.append(falha)
+
+            plano_enriquecido[
+                "beneficiario"
+            ] = beneficiario
+
+        else:
+            plano_enriquecido[
+                "beneficiario"
+            ] = None
+
+        # ----------------------------------------------
+        # Programa
+        # ----------------------------------------------
+
+        id_programa = plano_acao.get(
+            "id_programa"
+        )
+
+        if id_programa is not None:
+            programa, falha = (
+                self.executar_etapa(
+                    "programa",
+                    self.buscar_programa,
+                    id_programa,
+                    valor_padrao=None,
+                )
+            )
+
+            if falha:
+                falha[
+                    "id_programa"
+                ] = id_programa
+
+                erros.append(falha)
+
+            plano_enriquecido[
+                "programa"
+            ] = programa
+
+        else:
+            plano_enriquecido[
+                "programa"
+            ] = None
+
+        return plano_enriquecido
 
     # ==================================================
     # ENRIQUECIMENTO - DOCUMENTOS HÁBEIS
@@ -288,19 +520,21 @@ class ExtratorPMMG:
         erros: list[dict],
     ) -> list[dict]:
         for documento in documentos_habeis:
-            id_dh = documento.get("id_dh")
+            id_dh = documento.get(
+                "id_dh"
+            )
 
             if id_dh is None:
                 documento["op_ob"] = []
 
-                falha = {
-                    "etapa": "op_ob",
-                    "erro": (
-                        "Documento hábil sem id_dh."
-                    ),
-                }
-
-                erros.append(falha)
+                erros.append(
+                    {
+                        "etapa": "op_ob",
+                        "erro": (
+                            "Documento hábil sem id_dh."
+                        ),
+                    }
+                )
 
                 self.logger.warning(
                     "Documento hábil sem id_dh"
@@ -308,11 +542,13 @@ class ExtratorPMMG:
 
                 continue
 
-            op_ob, falha = self.executar_etapa(
-                "op_ob",
-                self.buscar_op_ob,
-                id_dh,
-                valor_padrao=[],
+            op_ob, falha = (
+                self.executar_etapa(
+                    "op_ob",
+                    self.buscar_op_ob,
+                    id_dh,
+                    valor_padrao=[],
+                )
             )
 
             documento["op_ob"] = op_ob
@@ -342,16 +578,16 @@ class ExtratorPMMG:
                     "documentos_habeis"
                 ] = []
 
-                falha = {
-                    "etapa": (
-                        "documentos_habeis"
-                    ),
-                    "erro": (
-                        "Empenho sem id_empenho."
-                    ),
-                }
-
-                erros.append(falha)
+                erros.append(
+                    {
+                        "etapa": (
+                            "documentos_habeis"
+                        ),
+                        "erro": (
+                            "Empenho sem id_empenho."
+                        ),
+                    }
+                )
 
                 self.logger.warning(
                     "Empenho sem id_empenho"
@@ -375,21 +611,20 @@ class ExtratorPMMG:
 
                 erros.append(falha)
 
-            documentos_habeis = (
-                self.enriquecer_documentos_habeis(
+            empenho[
+                "documentos_habeis"
+            ] = (
+                self
+                .enriquecer_documentos_habeis(
                     documentos_habeis,
                     erros,
                 )
             )
 
-            empenho[
-                "documentos_habeis"
-            ] = documentos_habeis
-
         return empenhos
 
     # ==================================================
-    # ENRIQUECIMENTO - SUBTRANSAÇÕES
+    # ENRIQUECIMENTO - GESTÃO FINANCEIRA
     # ==================================================
 
     def enriquecer_lancamentos_gestao_financeira(
@@ -397,11 +632,6 @@ class ExtratorPMMG:
         lancamentos: list[dict],
         erros: list[dict],
     ) -> list[dict]:
-        """
-        Consulta subtransações apenas quando
-        a API informar quantidade maior que zero.
-        """
-
         for lancamento in lancamentos:
             quantidade = lancamento.get(
                 (
@@ -412,7 +642,10 @@ class ExtratorPMMG:
             )
 
             if not quantidade:
-                lancamento["subtransacoes"] = []
+                lancamento[
+                    "subtransacoes"
+                ] = []
+
                 continue
 
             id_lancamento = lancamento.get(
@@ -420,26 +653,22 @@ class ExtratorPMMG:
             )
 
             if not id_lancamento:
-                lancamento["subtransacoes"] = []
+                lancamento[
+                    "subtransacoes"
+                ] = []
 
-                falha = {
-                    "etapa": (
-                        "subtransacoes_"
-                        "gestao_financeira"
-                    ),
-                    "erro": (
-                        "Lançamento com subtransações "
-                        "sem identificador."
-                    ),
-                }
-
-                erros.append(falha)
-
-                self.logger.warning(
-                    (
-                        "Lançamento com subtransações "
-                        "sem identificador"
-                    )
+                erros.append(
+                    {
+                        "etapa": (
+                            "subtransacoes_"
+                            "gestao_financeira"
+                        ),
+                        "erro": (
+                            "Lançamento com "
+                            "subtransações sem "
+                            "identificador."
+                        ),
+                    }
                 )
 
                 continue
@@ -472,48 +701,30 @@ class ExtratorPMMG:
 
         return lancamentos
 
-    # ==================================================
-    # ENRIQUECIMENTO - GESTÃO FINANCEIRA
-    # ==================================================
-
     def enriquecer_gestao_financeira(
         self,
         plano_acao: dict | None,
         erros: list[dict],
     ) -> dict:
-        gestao_financeira = {
+        resultado = {
             "id_agencia_conta": None,
             "lancamentos": [],
             "saldo_conta": [],
         }
 
-        if not plano_acao:
-            self.logger.warning(
-                (
-                    "Gestão financeira ignorada: "
-                    "plano_acao indisponível"
-                )
-            )
-
-            return gestao_financeira
+        if plano_acao is None:
+            return resultado
 
         id_agencia_conta = plano_acao.get(
             "id_agencia_conta"
         )
 
-        gestao_financeira[
+        resultado[
             "id_agencia_conta"
         ] = id_agencia_conta
 
         if not id_agencia_conta:
-            self.logger.info(
-                (
-                    "Gestão financeira sem consulta: "
-                    "plano sem id_agencia_conta"
-                )
-            )
-
-            return gestao_financeira
+            return resultado
 
         lancamentos, falha = (
             self.executar_etapa(
@@ -554,15 +765,15 @@ class ExtratorPMMG:
 
             erros.append(falha)
 
-        gestao_financeira[
+        resultado[
             "lancamentos"
         ] = lancamentos
 
-        gestao_financeira[
+        resultado[
             "saldo_conta"
         ] = saldo_conta
 
-        return gestao_financeira
+        return resultado
 
     # ==================================================
     # ENRIQUECIMENTO - RELATÓRIOS DE GESTÃO
@@ -573,7 +784,7 @@ class ExtratorPMMG:
         id_plano_acao: int,
         erros: list[dict],
     ) -> dict:
-        relatorios = {
+        resultado = {
             "novos": [],
             "legados": [],
         }
@@ -610,13 +821,13 @@ class ExtratorPMMG:
 
             erros.append(falha)
 
-        relatorios["novos"] = novos
-        relatorios["legados"] = legados
+        resultado["novos"] = novos
+        resultado["legados"] = legados
 
-        return relatorios
+        return resultado
 
     # ==================================================
-    # ENRIQUECIMENTO - HISTÓRICO DAS ANÁLISES
+    # ENRIQUECIMENTO - ANÁLISES
     # ==================================================
 
     def enriquecer_analises(
@@ -630,22 +841,20 @@ class ExtratorPMMG:
             )
 
             if id_analise is None:
-                analise["historico"] = []
+                analise[
+                    "historico"
+                ] = []
 
-                falha = {
-                    "etapa": (
-                        "historico_analise"
-                    ),
-                    "erro": (
-                        "Análise sem "
-                        "id_plano_trabalho_analise_pt."
-                    ),
-                }
-
-                erros.append(falha)
-
-                self.logger.warning(
-                    "Análise sem identificador"
+                erros.append(
+                    {
+                        "etapa": (
+                            "historico_analise"
+                        ),
+                        "erro": (
+                            "Análise sem "
+                            "identificador."
+                        ),
+                    }
                 )
 
                 continue
@@ -681,14 +890,6 @@ class ExtratorPMMG:
         planos_trabalho: list[dict],
         erros: list[dict],
     ) -> list[dict]:
-        """
-        Acrescenta a cada Plano de Trabalho:
-
-        - analises[]
-          - historico[]
-        - orgaos_analises_pendentes[]
-        """
-
         for plano_trabalho in planos_trabalho:
             id_plano_trabalho = (
                 plano_trabalho.get(
@@ -696,38 +897,60 @@ class ExtratorPMMG:
                 )
             )
 
+            plano_trabalho[
+                "historico"
+            ] = []
+
+            plano_trabalho[
+                "analises"
+            ] = []
+
+            plano_trabalho[
+                "orgaos_analises_pendentes"
+            ] = []
+
             if id_plano_trabalho is None:
-                plano_trabalho[
-                    "analises"
-                ] = []
-
-                plano_trabalho[
-                    "orgaos_analises_pendentes"
-                ] = []
-
-                falha = {
-                    "etapa": (
-                        "analises_plano_trabalho"
-                    ),
-                    "erro": (
-                        "Plano de trabalho sem "
-                        "id_plano_trabalho."
-                    ),
-                }
-
-                erros.append(falha)
-
-                self.logger.warning(
-                    (
-                        "Plano de trabalho "
-                        "sem identificador"
-                    )
+                erros.append(
+                    {
+                        "etapa": (
+                            "enriquecimento_"
+                            "plano_trabalho"
+                        ),
+                        "erro": (
+                            "Plano de trabalho "
+                            "sem id_plano_trabalho."
+                        ),
+                    }
                 )
 
                 continue
 
             # ------------------------------------------
-            # Análises atuais
+            # Histórico do plano de trabalho
+            # ------------------------------------------
+
+            historico, falha = (
+                self.executar_etapa(
+                    "historico_plano_trabalho",
+                    self.buscar_historico_plano_trabalho,
+                    id_plano_trabalho,
+                    valor_padrao=[],
+                )
+            )
+
+            if falha:
+                falha[
+                    "id_plano_trabalho"
+                ] = id_plano_trabalho
+
+                erros.append(falha)
+
+            plano_trabalho[
+                "historico"
+            ] = historico
+
+            # ------------------------------------------
+            # Análises
             # ------------------------------------------
 
             analises, falha = (
@@ -746,29 +969,21 @@ class ExtratorPMMG:
 
                 erros.append(falha)
 
-            analises = self.enriquecer_analises(
+            plano_trabalho[
+                "analises"
+            ] = self.enriquecer_analises(
                 analises,
                 erros,
             )
 
-            plano_trabalho[
-                "analises"
-            ] = analises
-
             # ------------------------------------------
-            # Órgãos pendentes
+            # Órgãos com análise pendente
             # ------------------------------------------
 
             pendentes, falha = (
                 self.executar_etapa(
-                    (
-                        "orgaos_analises_"
-                        "pendentes"
-                    ),
-                    (
-                        self
-                        .buscar_orgaos_analises_pendentes
-                    ),
+                    "orgaos_analises_pendentes",
+                    self.buscar_orgaos_analises_pendentes,
                     id_plano_trabalho,
                     valor_padrao=[],
                 )
@@ -816,6 +1031,17 @@ class ExtratorPMMG:
         )
 
         # ----------------------------------------------
+        # Executor + Finalidades
+        # ----------------------------------------------
+
+        executor_enriquecido = (
+            self.enriquecer_executor(
+                executor,
+                erros,
+            )
+        )
+
+        # ----------------------------------------------
         # Plano de Ação
         # ----------------------------------------------
 
@@ -834,6 +1060,13 @@ class ExtratorPMMG:
             ] = id_plano_acao
 
             erros.append(falha)
+
+        plano_acao_enriquecido = (
+            self.enriquecer_plano_acao(
+                plano_acao,
+                erros,
+            )
+        )
 
         # ----------------------------------------------
         # Planos de Trabalho
@@ -883,7 +1116,7 @@ class ExtratorPMMG:
             erros.append(falha)
 
         # ----------------------------------------------
-        # Empenhos
+        # Execução financeira
         # ----------------------------------------------
 
         empenhos, falha = (
@@ -902,13 +1135,15 @@ class ExtratorPMMG:
 
             erros.append(falha)
 
-        empenhos = self.enriquecer_empenhos(
-            empenhos,
-            erros,
+        empenhos = (
+            self.enriquecer_empenhos(
+                empenhos,
+                erros,
+            )
         )
 
         # ----------------------------------------------
-        # Gestão Financeira
+        # Gestão financeira
         # ----------------------------------------------
 
         gestao_financeira = (
@@ -966,9 +1201,15 @@ class ExtratorPMMG:
             )
 
         return {
-            "executor": executor,
-            "plano_acao": plano_acao,
-            "planos_trabalho": planos_trabalho,
+            "executor": (
+                executor_enriquecido
+            ),
+            "plano_acao": (
+                plano_acao_enriquecido
+            ),
+            "planos_trabalho": (
+                planos_trabalho
+            ),
             "metas": metas,
             "empenhos": empenhos,
             "gestao_financeira": (
@@ -994,7 +1235,9 @@ class ExtratorPMMG:
             "Buscando executores da PMMG"
         )
 
-        executores = self.buscar_executores()
+        executores = (
+            self.buscar_executores()
+        )
 
         total = len(executores)
 
@@ -1030,10 +1273,14 @@ class ExtratorPMMG:
                 id_executor,
             )
 
-            resultado = self.extrair_plano(
-                executor
+            resultado = (
+                self.extrair_plano(
+                    executor
+                )
             )
 
-            resultados.append(resultado)
+            resultados.append(
+                resultado
+            )
 
         return resultados
