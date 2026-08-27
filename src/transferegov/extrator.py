@@ -15,9 +15,9 @@ class ExtratorPMMG:
             "transferegov.extrator"
         )
 
-    # --------------------------------------------------
-    # CONSULTAS
-    # --------------------------------------------------
+    # ==================================================
+    # CONSULTAS BÁSICAS
+    # ==================================================
 
     def buscar_executores(
         self,
@@ -67,6 +67,10 @@ class ExtratorPMMG:
             },
         )
 
+    # ==================================================
+    # EXECUÇÃO FINANCEIRA FEDERAL
+    # ==================================================
+
     def buscar_empenhos(
         self,
         id_plano_acao: int,
@@ -103,9 +107,48 @@ class ExtratorPMMG:
             },
         )
 
-    # --------------------------------------------------
+    # ==================================================
+    # GESTÃO FINANCEIRA
+    # ==================================================
+
+    def buscar_lancamentos_gestao_financeira(
+        self,
+        id_agencia_conta: str,
+    ) -> list[dict]:
+        return self.api.consultar_paginado(
+            "gestao_financeira_lancamentos_especiais",
+            filtros={
+                "id_agencia_conta": id_agencia_conta,
+            },
+        )
+
+    def buscar_subtransacoes_gestao_financeira(
+        self,
+        id_lancamento_gestao_financeira: str,
+    ) -> list[dict]:
+        return self.api.consultar_paginado(
+            "gestao_financeira_subtransacoes_especiais",
+            filtros={
+                "id_lancamento_gestao_financeira": (
+                    id_lancamento_gestao_financeira
+                ),
+            },
+        )
+
+    def buscar_saldo_gestao_financeira(
+        self,
+        id_agencia_conta: str,
+    ) -> list[dict]:
+        return self.api.consultar_paginado(
+            "saldo_conta_gestao_financeira_especiais",
+            filtros={
+                "id_agencia_conta": id_agencia_conta,
+            },
+        )
+
+    # ==================================================
     # CONTROLE DE FALHAS
-    # --------------------------------------------------
+    # ==================================================
 
     def executar_etapa(
         self,
@@ -115,10 +158,12 @@ class ExtratorPMMG:
         valor_padrao: Any = None,
     ) -> tuple[Any, dict | None]:
         """
-        Executa uma etapa isoladamente.
+        Executa uma etapa de forma isolada.
 
-        Se ocorrer erro, registra a falha e retorna
-        um valor padrão sem interromper todo o plano.
+        Em caso de falha:
+        - registra no log;
+        - retorna valor padrão;
+        - não interrompe todo o plano.
         """
 
         try:
@@ -149,9 +194,9 @@ class ExtratorPMMG:
 
             return valor_padrao, falha
 
-    # --------------------------------------------------
-    # ENRIQUECIMENTO FINANCEIRO
-    # --------------------------------------------------
+    # ==================================================
+    # ENRIQUECIMENTO DA EXECUÇÃO FINANCEIRA
+    # ==================================================
 
     def enriquecer_documentos_habeis(
         self,
@@ -255,9 +300,185 @@ class ExtratorPMMG:
 
         return empenhos
 
-    # --------------------------------------------------
+    # ==================================================
+    # ENRIQUECIMENTO DA GESTÃO FINANCEIRA
+    # ==================================================
+
+    def enriquecer_lancamentos_gestao_financeira(
+        self,
+        lancamentos: list[dict],
+        erros: list[dict],
+    ) -> list[dict]:
+        """
+        Consulta subtransações somente quando
+        quantidade_subtransacoes > 0.
+        """
+
+        for lancamento in lancamentos:
+            quantidade = lancamento.get(
+                (
+                    "quantidade_subtransacoes_"
+                    "lancamento_gestao_financeira"
+                ),
+                0,
+            )
+
+            if not quantidade:
+                lancamento["subtransacoes"] = []
+                continue
+
+            id_lancamento = lancamento.get(
+                "id_lancamento_gestao_financeira"
+            )
+
+            if not id_lancamento:
+                lancamento["subtransacoes"] = []
+
+                falha = {
+                    "etapa": (
+                        "subtransacoes_gestao_financeira"
+                    ),
+                    "erro": (
+                        "Lançamento com subtransações "
+                        "sem id_lancamento_gestao_financeira."
+                    ),
+                }
+
+                erros.append(falha)
+
+                self.logger.warning(
+                    (
+                        "Lançamento com subtransações "
+                        "sem identificador"
+                    )
+                )
+
+                continue
+
+            subtransacoes, falha = (
+                self.executar_etapa(
+                    (
+                        "subtransacoes_"
+                        "gestao_financeira"
+                    ),
+                    self.buscar_subtransacoes_gestao_financeira,
+                    id_lancamento,
+                    valor_padrao=[],
+                )
+            )
+
+            lancamento[
+                "subtransacoes"
+            ] = subtransacoes
+
+            if falha:
+                falha[
+                    "id_lancamento_gestao_financeira"
+                ] = id_lancamento
+
+                erros.append(falha)
+
+        return lancamentos
+
+    def enriquecer_gestao_financeira(
+        self,
+        plano_acao: dict | None,
+        erros: list[dict],
+    ) -> dict:
+        """
+        Busca lançamentos, subtransações e saldo
+        usando id_agencia_conta do Plano de Ação.
+        """
+
+        gestao_financeira = {
+            "id_agencia_conta": None,
+            "lancamentos": [],
+            "saldo_conta": [],
+        }
+
+        if not plano_acao:
+            self.logger.warning(
+                (
+                    "Gestão financeira ignorada: "
+                    "plano_acao indisponível"
+                )
+            )
+
+            return gestao_financeira
+
+        id_agencia_conta = plano_acao.get(
+            "id_agencia_conta"
+        )
+
+        gestao_financeira[
+            "id_agencia_conta"
+        ] = id_agencia_conta
+
+        if not id_agencia_conta:
+            self.logger.warning(
+                (
+                    "Gestão financeira ignorada: "
+                    "plano sem id_agencia_conta"
+                )
+            )
+
+            return gestao_financeira
+
+        lancamentos, falha = (
+            self.executar_etapa(
+                (
+                    "lancamentos_"
+                    "gestao_financeira"
+                ),
+                self.buscar_lancamentos_gestao_financeira,
+                id_agencia_conta,
+                valor_padrao=[],
+            )
+        )
+
+        if falha:
+            falha[
+                "id_agencia_conta"
+            ] = id_agencia_conta
+
+            erros.append(falha)
+
+        lancamentos = (
+            self.enriquecer_lancamentos_gestao_financeira(
+                lancamentos,
+                erros,
+            )
+        )
+
+        saldo_conta, falha = (
+            self.executar_etapa(
+                "saldo_gestao_financeira",
+                self.buscar_saldo_gestao_financeira,
+                id_agencia_conta,
+                valor_padrao=[],
+            )
+        )
+
+        if falha:
+            falha[
+                "id_agencia_conta"
+            ] = id_agencia_conta
+
+            erros.append(falha)
+
+        gestao_financeira[
+            "lancamentos"
+        ] = lancamentos
+
+        gestao_financeira[
+            "saldo_conta"
+        ] = saldo_conta
+
+        return gestao_financeira
+
+    # ==================================================
     # EXTRAÇÃO DE UM PLANO
-    # --------------------------------------------------
+    # ==================================================
 
     def extrair_plano(
         self,
@@ -283,6 +504,10 @@ class ExtratorPMMG:
             id_executor,
         )
 
+        # ----------------------------------------------
+        # Plano de Ação
+        # ----------------------------------------------
+
         plano_acao, falha = (
             self.executar_etapa(
                 "plano_acao",
@@ -298,6 +523,10 @@ class ExtratorPMMG:
             ] = id_plano_acao
 
             erros.append(falha)
+
+        # ----------------------------------------------
+        # Plano de Trabalho
+        # ----------------------------------------------
 
         planos_trabalho, falha = (
             self.executar_etapa(
@@ -315,6 +544,10 @@ class ExtratorPMMG:
 
             erros.append(falha)
 
+        # ----------------------------------------------
+        # Metas
+        # ----------------------------------------------
+
         metas, falha = (
             self.executar_etapa(
                 "metas",
@@ -330,6 +563,10 @@ class ExtratorPMMG:
             ] = id_executor
 
             erros.append(falha)
+
+        # ----------------------------------------------
+        # Execução Financeira Federal
+        # ----------------------------------------------
 
         empenhos, falha = (
             self.executar_etapa(
@@ -351,6 +588,21 @@ class ExtratorPMMG:
             empenhos,
             erros,
         )
+
+        # ----------------------------------------------
+        # Gestão Financeira
+        # ----------------------------------------------
+
+        gestao_financeira = (
+            self.enriquecer_gestao_financeira(
+                plano_acao,
+                erros,
+            )
+        )
+
+        # ----------------------------------------------
+        # Status final
+        # ----------------------------------------------
 
         status_extracao = (
             "COM_ERROS"
@@ -390,13 +642,18 @@ class ExtratorPMMG:
             "planos_trabalho": planos_trabalho,
             "metas": metas,
             "empenhos": empenhos,
-            "status_extracao": status_extracao,
+            "gestao_financeira": (
+                gestao_financeira
+            ),
+            "status_extracao": (
+                status_extracao
+            ),
             "erros_extracao": erros,
         }
 
-    # --------------------------------------------------
+    # ==================================================
     # EXTRAÇÃO COMPLETA
-    # --------------------------------------------------
+    # ==================================================
 
     def extrair(
         self,
