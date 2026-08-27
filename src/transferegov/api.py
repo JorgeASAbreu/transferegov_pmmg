@@ -77,6 +77,25 @@ class TransferegovAPI:
 
         return session
 
+    @staticmethod
+    def _normalizar_endpoint(
+        endpoint: str,
+    ) -> str:
+        """
+        Converte o nome interno do endpoint para o formato
+        atual da API pública do Transferegov.
+
+        Internamente, o projeto mantém nomes com underscore
+        para preservar compatibilidade com a V4/V5.
+        A API HTTP atual utiliza hífens nas rotas.
+
+        Exemplo:
+            executores_especiais
+            -> executores-especiais
+        """
+
+        return endpoint.replace("_", "-")
+
     def _validar_resposta(
         self,
         resposta: Response,
@@ -126,7 +145,9 @@ class TransferegovAPI:
         Executa uma requisição GET na API.
         """
 
-        url = f"{BASE_URL}/{endpoint}"
+        endpoint_http = self._normalizar_endpoint(endpoint)
+
+        url = f"{BASE_URL}/{endpoint_http}"
 
         self.logger.info(
             "GET | endpoint=%s | params=%s",
