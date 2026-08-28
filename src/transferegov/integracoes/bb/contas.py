@@ -8,43 +8,52 @@ from typing import Any
 
 class DescobridorContasBB:
     """
-    Descobre automaticamente as contas bancárias
-    associadas às Transferências Especiais a partir
-    do JSON produzido pela V4.
+    Descobre as contas do Banco do Brasil que devem ser consultadas
+    pela integração da PMMG.
 
-    Granularidade do arquivo de saída:
-        1 registro = 1 agência/conta única.
+    REGRA DE NEGÓCIO
+    =================
+    O Transferegov apresenta dois contextos bancários distintos:
 
-    Uma mesma conta pode estar associada a vários
-    Planos de Ação, especialmente antes de 2025.
+    1. conta_plano_acao
+       Conta de ingresso/rastreabilidade do recurso federal no Estado.
+
+    2. conta_executor
+       Conta para a qual o recurso é remanejado dentro do Estado e que
+       pertence ao executor. Para a PMMG, esta é a conta operacional
+       consultável pela API do Banco do Brasil.
+
+    Portanto:
+
+        conta_consulta_bb = conta_executor
+
+    A conta do Plano de Ação é preservada exclusivamente como vínculo
+    de origem e rastreabilidade. Ela NÃO é usada para consultar saldo
+    ou investimentos na API BB.
+
+    Granularidade da saída:
+        1 registro = 1 agência/conta de executor única.
+
+    Uma conta de executor pode estar associada a mais de um Plano de
+    Ação. Quando isso ocorrer, todos os vínculos são preservados.
     """
-
-    ANO_INICIO_CONTA_EXCLUSIVA = 2025
 
     def __init__(
         self,
         caminho_origem: str = "dados/transferegov_pmmg.json",
         caminho_destino: str = "dados/bb/contas.json",
     ) -> None:
-        self.caminho_origem = Path(
-            caminho_origem
-        )
-
-        self.caminho_destino = Path(
-            caminho_destino
-        )
+        self.caminho_origem = Path(caminho_origem)
+        self.caminho_destino = Path(caminho_destino)
 
     # ==================================================
     # CARGA
     # ==================================================
 
-    def carregar_dados(
-        self,
-    ) -> list[dict[str, Any]]:
+    def carregar_dados(self) -> list[dict[str, Any]]:
         if not self.caminho_origem.exists():
             raise FileNotFoundError(
-                f"Arquivo não encontrado: "
-                f"{self.caminho_origem}"
+                f"Arquivo não encontrado: {self.caminho_origem}"
             )
 
         with self.caminho_origem.open(
@@ -55,8 +64,7 @@ class DescobridorContasBB:
 
         if not isinstance(dados, list):
             raise ValueError(
-                "O JSON principal deve conter "
-                "uma lista de registros."
+                "O JSON principal deve conter uma lista de registros."
             )
 
         return dados
@@ -65,140 +73,91 @@ class DescobridorContasBB:
     # DESCOBERTA
     # ==================================================
 
-    def descobrir(
-        self,
-    ) -> list[dict[str, Any]]:
+    def descobrir(self) -> list[dict[str, Any]]:
         dados = self.carregar_dados()
 
-        contas: dict[
+        contas: dict[str, dict[str, Any]] = {}
+        planos_por_conta: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        contas_plano_por_executor: dict[
             str,
-            dict[str, Any],
-        ] = {}
-
-        planos_por_conta: dict[
-            str,
-            list[dict[str, Any]],
-        ] = defaultdict(list)
+            dict[str, dict[str, Any]],
+        ] = defaultdict(dict)
 
         for registro in dados:
-            plano = (
-                registro.get("plano_acao")
-                or {}
-            )
+            executor = registro.get("executor") or {}
+            plano = registro.get("plano_acao") or {}
 
-            id_agencia_conta = plano.get(
-                "id_agencia_conta"
-            )
+            dados_executor = self._extrair_conta_executor(executor)
 
-            if not id_agencia_conta:
+            # Sem conta do executor não existe conta consultável no BB.
+            if dados_executor is None:
                 continue
 
-            agencia, conta = (
-                self._separar_agencia_conta(
-                    id_agencia_conta
-                )
+            id_conta_executor = dados_executor["id_agencia_conta_executor"]
+
+            plano_vinculado = self._extrair_vinculo_plano(
+                plano=plano,
+                executor=executor,
             )
 
-            if (
-                agencia is None
-                or conta is None
-            ):
-                continue
+            planos_por_conta[id_conta_executor].append(plano_vinculado)
 
-            id_plano_acao = plano.get(
-                "id_plano_acao"
-            )
+            conta_plano = plano_vinculado.get("conta_plano_acao")
 
-            ano_plano_acao = plano.get(
-                "ano_plano_acao"
-            )
+            if conta_plano:
+                id_conta_plano = conta_plano.get("id_agencia_conta")
 
-            planos_por_conta[
-                id_agencia_conta
-            ].append(
-                {
-                    "id_plano_acao": (
-                        id_plano_acao
-                    ),
-                    "codigo_plano_acao": (
-                        plano.get(
-                            "codigo_plano_acao"
-                        )
-                    ),
-                    "ano_plano_acao": (
-                        ano_plano_acao
-                    ),
-                }
-            )
+                if id_conta_plano:
+                    contas_plano_por_executor[id_conta_executor][
+                        id_conta_plano
+                    ] = conta_plano
 
-            if (
-                id_agencia_conta
-                not in contas
-            ):
-                contas[
-                    id_agencia_conta
-                ] = {
-                    "id_agencia_conta": (
-                        id_agencia_conta
-                    ),
-                    "agencia": agencia,
-                    "conta": conta,
-                    "ativa": True,
+            if id_conta_executor not in contas:
+                contas[id_conta_executor] = {
+                    **dados_executor,
+                    "origem_conta_consulta_bb": "executor",
+                    "campo_agencia_origem": "numero_agencia_executor",
+                    "campo_conta_origem": "numero_conta_executor",
+                    "ativa": self._eh_conta_ativa(executor),
                 }
 
-        resultado: list[
-            dict[str, Any]
-        ] = []
+        resultado: list[dict[str, Any]] = []
 
-        for (
-            id_agencia_conta,
-            conta_base,
-        ) in contas.items():
-            planos = planos_por_conta[
-                id_agencia_conta
-            ]
+        for id_conta_executor, conta_base in contas.items():
+            planos = planos_por_conta[id_conta_executor]
 
             anos = sorted(
                 {
-                    plano.get(
-                        "ano_plano_acao"
-                    )
+                    plano["ano_plano_acao"]
                     for plano in planos
-                    if plano.get(
-                        "ano_plano_acao"
-                    )
-                    is not None
+                    if plano.get("ano_plano_acao") is not None
                 }
             )
 
-            conta_compartilhada = (
-                self._eh_conta_compartilhada(
-                    planos
-                )
+            contas_plano_acao = sorted(
+                contas_plano_por_executor[id_conta_executor].values(),
+                key=lambda item: (
+                    item.get("agencia") or "",
+                    item.get("conta") or "",
+                ),
             )
 
-            registro_conta = {
-                **conta_base,
-
-                "quantidade_planos_acao": (
-                    len(planos)
-                ),
-
-                "planos_acao": planos,
-
-                "anos_planos_acao": anos,
-
-                "conta_compartilhada": (
-                    conta_compartilhada
-                ),
-
-                "conta_exclusiva_te": (
-                    not conta_compartilhada
-                ),
-            }
+            quantidade_planos = len(planos)
+            conta_compartilhada = quantidade_planos > 1
 
             resultado.append(
-                registro_conta
+                {
+                    **conta_base,
+                    "quantidade_planos_acao": quantidade_planos,
+                    "planos_acao": planos,
+                    "anos_planos_acao": anos,
+                    "conta_compartilhada": conta_compartilhada,
+                    "conta_exclusiva_te": not conta_compartilhada,
+                    "quantidade_contas_plano_acao_origem": (
+                        len(contas_plano_acao)
+                    ),
+                    "contas_plano_acao_origem": contas_plano_acao,
+                }
             )
 
         resultado.sort(
@@ -211,52 +170,183 @@ class DescobridorContasBB:
         return resultado
 
     # ==================================================
-    # REGRA DE CONTA
+    # EXTRAÇÃO DA CONTA DO EXECUTOR
     # ==================================================
 
-    def _eh_conta_compartilhada(
-        self,
-        planos: list[dict[str, Any]],
-    ) -> bool:
+    @classmethod
+    def _extrair_conta_executor(
+        cls,
+        executor: dict[str, Any],
+    ) -> dict[str, Any] | None:
         """
-        Regra adotada no projeto:
+        Extrai a conta operacional do executor.
 
-        - até 2024 uma conta pode atender mais
-          de uma TE;
-        - a partir de 2025, 1 TE = 1 conta.
-
-        Também considera o vínculo real:
-        se houver mais de um Plano de Ação
-        associado à mesma conta, ela é marcada
-        como compartilhada.
+        Esta é a conta utilizada pela API BB.
         """
 
-        if len(planos) > 1:
-            return True
-
-        anos = [
-            plano.get(
-                "ano_plano_acao"
-            )
-            for plano in planos
-            if plano.get(
-                "ano_plano_acao"
-            )
-            is not None
-        ]
-
-        if not anos:
-            return False
-
-        return any(
-            ano
-            < self.ANO_INICIO_CONTA_EXCLUSIVA
-            for ano in anos
+        agencia = cls._normalizar_numero(
+            executor.get("numero_agencia_executor")
+        )
+        conta = cls._normalizar_numero(
+            executor.get("numero_conta_executor")
         )
 
+        if agencia is None or conta is None:
+            return None
+
+        dv_agencia = cls._normalizar_texto(
+            executor.get("numero_dv_agencia_executor")
+        )
+        dv_conta = cls._normalizar_texto(
+            executor.get("numero_dv_conta_executor")
+        )
+
+        return {
+            "id_agencia_conta_executor": f"{agencia}-{conta}",
+            "banco": cls._normalizar_texto(
+                executor.get("nome_banco_executor")
+            ),
+            "codigo_banco": cls._normalizar_texto(
+                executor.get("codigo_banco_executor")
+            ),
+            "agencia": agencia,
+            "dv_agencia": dv_agencia,
+            "nome_agencia": cls._normalizar_texto(
+                executor.get("nome_agencia_executor")
+            ),
+            "conta": conta,
+            "dv_conta": dv_conta,
+            "situacao": cls._normalizar_texto(
+                executor.get(
+                    "descricao_situacao_dado_bancario_executor"
+                )
+            ),
+            "codigo_situacao": executor.get(
+                "codigo_situacao_dado_bancario_executor"
+            ),
+        }
+
     # ==================================================
-    # PARSE AGÊNCIA / CONTA
+    # VÍNCULO COM O PLANO DE AÇÃO
     # ==================================================
+
+    @classmethod
+    def _extrair_vinculo_plano(
+        cls,
+        plano: dict[str, Any],
+        executor: dict[str, Any],
+    ) -> dict[str, Any]:
+        conta_plano = cls._extrair_conta_plano_acao(plano)
+
+        return {
+            "id_plano_acao": plano.get("id_plano_acao"),
+            "codigo_plano_acao": plano.get("codigo_plano_acao"),
+            "ano_plano_acao": plano.get("ano_plano_acao"),
+            "situacao_plano_acao": plano.get("situacao_plano_acao"),
+            "nome_objeto": plano.get("nome_objeto"),
+            "nome_parlamentar": plano.get(
+                "nome_parlamentar_emenda_plano_acao"
+            ),
+            "conta_plano_acao": conta_plano,
+            "id_executor": executor.get("id_executor"),
+        }
+
+    @classmethod
+    def _extrair_conta_plano_acao(
+        cls,
+        plano: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """
+        Preserva a conta de origem do Plano de Ação apenas para
+        rastreabilidade.
+
+        Ela não é utilizada como conta de consulta da API BB.
+        """
+
+        agencia = cls._normalizar_numero(
+            plano.get("numero_agencia_plano_acao")
+        )
+        conta = cls._normalizar_numero(
+            plano.get("numero_conta_plano_acao")
+        )
+
+        # Compatibilidade com registros em que exista apenas
+        # o identificador composto "AGENCIA-CONTA".
+        if agencia is None or conta is None:
+            id_agencia_conta = plano.get("id_agencia_conta")
+
+            if id_agencia_conta:
+                agencia_id, conta_id = cls._separar_agencia_conta(
+                    str(id_agencia_conta)
+                )
+
+                agencia = agencia or agencia_id
+                conta = conta or conta_id
+
+        if agencia is None or conta is None:
+            return None
+
+        return {
+            "id_agencia_conta": f"{agencia}-{conta}",
+            "agencia": agencia,
+            "dv_agencia": cls._normalizar_texto(
+                plano.get("dv_agencia_plano_acao")
+            ),
+            "conta": conta,
+            "dv_conta": cls._normalizar_texto(
+                plano.get("dv_conta_plano_acao")
+            ),
+            "situacao": cls._normalizar_texto(
+                plano.get(
+                    "descricao_situacao_dado_bancario_plano_acao"
+                )
+            ),
+        }
+
+    # ==================================================
+    # REGRAS AUXILIARES
+    # ==================================================
+
+    @staticmethod
+    def _eh_conta_ativa(
+        executor: dict[str, Any],
+    ) -> bool | None:
+        descricao = executor.get(
+            "descricao_situacao_dado_bancario_executor"
+        )
+
+        if descricao is None:
+            return None
+
+        return str(descricao).strip().casefold() == "conta ativa".casefold()
+
+    @staticmethod
+    def _normalizar_numero(
+        valor: Any,
+    ) -> str | None:
+        if valor is None:
+            return None
+
+        texto = str(valor).strip()
+
+        if not texto:
+            return None
+
+        if not texto.isdigit():
+            return None
+
+        return texto
+
+    @staticmethod
+    def _normalizar_texto(
+        valor: Any,
+    ) -> str | None:
+        if valor is None:
+            return None
+
+        texto = str(valor).strip()
+
+        return texto or None
 
     @staticmethod
     def _separar_agencia_conta(
@@ -269,25 +359,25 @@ class DescobridorContasBB:
 
         Exemplo:
 
-            1615-27418
+            1615-26884
         """
 
-        valor = str(
-            id_agencia_conta
-        ).strip()
+        valor = str(id_agencia_conta).strip()
 
         if "-" not in valor:
             return None, None
 
-        agencia, conta = valor.split(
-            "-",
-            1,
-        )
+        agencia, conta = valor.split("-", 1)
 
         agencia = agencia.strip()
         conta = conta.strip()
 
-        if not agencia or not conta:
+        if (
+            not agencia
+            or not conta
+            or not agencia.isdigit()
+            or not conta.isdigit()
+        ):
             return None, None
 
         return agencia, conta
@@ -316,13 +406,7 @@ class DescobridorContasBB:
                 indent=2,
             )
 
-    def executar(
-        self,
-    ) -> list[dict[str, Any]]:
+    def executar(self) -> list[dict[str, Any]]:
         contas = self.descobrir()
-
-        self.salvar(
-            contas
-        )
-
+        self.salvar(contas)
         return contas

@@ -115,31 +115,49 @@ class ConsolidacaoFinanceira:
 
     def _criar_indice_bb(
         self,
-    ) -> dict[str, dict[str, Any]]:
+    ) -> dict[str, dict[Any, dict[str, Any]]]:
         """
-        Indexa dados do Banco do Brasil por agência/conta.
+        Cria dois índices para compatibilidade e rastreabilidade:
 
-        Estrutura esperada nesta fronteira:
+        por_plano:
+            id_plano_acao -> resultado da conta EXECUTOR no BB.
 
-        {
-            "id_agencia_conta": "1615-27418",
-            "saldo_investimento_bb": 12345.67,
-            "valor_rendimentos": 456.78,
-            "data_consulta_bb": "2026-08-27"
-        }
+        legado_por_conta:
+            id_agencia_conta -> formato antigo de mocks/testes.
 
-        Os valores monetários acima ainda estão expressos em reais.
-        A conversão para centavos ocorre em _aplicar_bb().
+        O vínculo de produção é por id_plano_acao, obtido da lista
+        "planos_acao" gravada em cada resultado da conta executor.
+
+        Isso é importante porque a conta operacional consultada no BB
+        é a conta do executor, e não a conta bancária do Plano de Ação.
         """
-        indice: dict[str, dict[str, Any]] = {}
+        por_plano: dict[Any, dict[str, Any]] = {}
+        legado_por_conta: dict[str, dict[str, Any]] = {}
 
         for registro in self.dados_bb:
-            chave = registro.get("id_agencia_conta")
+            planos = registro.get("planos_acao")
 
-            if chave:
-                indice[str(chave)] = registro
+            if isinstance(planos, list):
+                for plano in planos:
+                    if not isinstance(plano, dict):
+                        continue
 
-        return indice
+                    id_plano_acao = plano.get("id_plano_acao")
+
+                    if id_plano_acao is not None:
+                        por_plano[id_plano_acao] = registro
+
+            # Compatibilidade temporária com testes/mocks V5
+            # anteriores ao uso da conta executor.
+            chave_legada = registro.get("id_agencia_conta")
+
+            if chave_legada:
+                legado_por_conta[str(chave_legada)] = registro
+
+        return {
+            "por_plano": por_plano,
+            "legado_por_conta": legado_por_conta,
+        }
 
     def _criar_indice_siafi(
         self,
@@ -178,47 +196,270 @@ class ConsolidacaoFinanceira:
     @staticmethod
     def _aplicar_bb(
         te: dict[str, Any],
-        indice_bb: dict[str, dict[str, Any]],
+        indice_bb: dict[str, dict[Any, dict[str, Any]]],
     ) -> None:
         """
-        Incorpora dados bancários à transferência.
+        Incorpora os dados do Banco do Brasil à Transferência Especial.
 
-        Todos os valores monetários são convertidos para centavos
-        antes de entrarem no modelo analítico.
+        REGRA DE VÍNCULO
+        ----------------
+        Produção:
+            id_plano_acao
+                -> conta executor
+                -> resultado da API BB
+
+        A conta do Plano de Ação não é usada como conta operacional
+        para consulta bancária.
+
+        REGRA DE QUALIDADE
+        ------------------
+        OK e SEM_FUNDOS:
+            verificacao_manual_bb = False
+
+        Qualquer outro status:
+            verificacao_manual_bb = True
+            valores bancários permanecem None
+            código/mensagem da API são preservados.
+
+        REGRA DE CONTA COMPARTILHADA
+        ----------------------------
+        Uma conta executor pode estar vinculada a mais de uma TE.
+
+        Quando isso ocorrer:
+        - o saldo observado no BB continua pertencendo à CONTA;
+        - o saldo total da conta NÃO é atribuído individualmente
+          a nenhuma TE;
+        - saldo_investimento_bb_conta_centavos preserva o valor
+          observado no nível bancário;
+        - saldo_investimento_bb_centavos fica None no nível da TE;
+        - saldo_bb_atribuivel_te = False;
+        - verificacao_manual_bb continua False se a API respondeu OK,
+          pois compartilhamento não é erro da API.
+
+        Isso impede dupla ou múltipla contagem do mesmo dinheiro em
+        agregações por Transferência Especial.
+
+        Ausência de informação nunca é convertida em zero.
         """
-        chave = te.get("id_agencia_conta")
+        te["id_agencia_conta_executor"] = None
+        te["agencia_executor_bb"] = None
+        te["conta_executor_bb"] = None
 
-        # Inicialização explícita.
-        #
-        # None significa "informação não disponível".
-        # Nunca substituir None por zero apenas para facilitar cálculo.
+        # Saldo observado na conta bancária, independentemente de ser
+        # atribuível a uma TE específica.
+        te["saldo_investimento_bb_conta_centavos"] = None
+
+        # Saldo que pode ser atribuído com segurança à TE.
         te["saldo_investimento_bb_centavos"] = None
+
         te["valor_rendimentos_centavos"] = None
         te["data_consulta_bb"] = None
+
         te["status_dados_bb"] = "NAO_DISPONIVEL"
+        te["verificacao_manual_bb"] = True
+        te["codigo_erro_api_bb"] = None
+        te["mensagem_erro_api_bb"] = None
+        te["status_http_bb"] = None
 
-        if not chave:
-            te["status_dados_bb"] = "SEM_CONTA"
-            return
+        te["quantidade_tes_conta_executor"] = None
+        te["conta_executor_compartilhada"] = None
+        te["saldo_bb_atribuivel_te"] = False
+        te["motivo_saldo_nao_atribuido"] = (
+            "DADOS_BB_NAO_DISPONIVEIS"
+        )
 
-        registro = indice_bb.get(str(chave))
+        id_plano_acao = te.get("id_plano_acao")
+
+        registro = indice_bb["por_plano"].get(id_plano_acao)
+
+        # Compatibilidade com mocks antigos do projeto.
+        if registro is None:
+            chave_legada = te.get("id_agencia_conta")
+
+            if chave_legada:
+                registro = indice_bb[
+                    "legado_por_conta"
+                ].get(str(chave_legada))
 
         if registro is None:
+            te["status_dados_bb"] = "SEM_RESULTADO_BB"
+            te["motivo_saldo_nao_atribuido"] = (
+                "SEM_RESULTADO_BB"
+            )
             return
 
-        te["saldo_investimento_bb_centavos"] = para_centavos(
-            registro.get("saldo_investimento_bb")
+        te["id_agencia_conta_executor"] = registro.get(
+            "id_agencia_conta_executor"
+        )
+        te["agencia_executor_bb"] = registro.get("agencia")
+        te["conta_executor_bb"] = registro.get("conta")
+
+        consultado_em = registro.get("consultado_em")
+        te["data_consulta_bb"] = (
+            consultado_em
+            or registro.get("data_consulta_bb")
         )
 
-        te["valor_rendimentos_centavos"] = para_centavos(
-            registro.get("valor_rendimentos")
+        quantidade_planos = registro.get(
+            "quantidade_planos_acao"
         )
 
-        te["data_consulta_bb"] = registro.get(
-            "data_consulta_bb"
+        if quantidade_planos is None:
+            planos = registro.get("planos_acao")
+
+            if isinstance(planos, list):
+                quantidade_planos = len(planos)
+
+        if quantidade_planos is not None:
+            try:
+                quantidade_planos = int(quantidade_planos)
+            except (TypeError, ValueError):
+                quantidade_planos = None
+
+        te["quantidade_tes_conta_executor"] = (
+            quantidade_planos
         )
 
-        te["status_dados_bb"] = "DISPONIVEL"
+        compartilhada = bool(
+            quantidade_planos is not None
+            and quantidade_planos > 1
+        )
+
+        te["conta_executor_compartilhada"] = (
+            compartilhada
+        )
+
+        status = registro.get("status_consulta")
+
+        # Compatibilidade com mocks antigos sem status.
+        if status is None and (
+            "saldo_investimento_bb" in registro
+            or "valor_rendimentos" in registro
+        ):
+            status = "OK"
+
+        te["status_dados_bb"] = (
+            status
+            if status is not None
+            else "NAO_DISPONIVEL"
+        )
+
+        te["status_http_bb"] = registro.get(
+            "status_http_bb"
+        )
+        te["codigo_erro_api_bb"] = registro.get(
+            "codigo_erro_api_bb"
+        )
+        te["mensagem_erro_api_bb"] = registro.get(
+            "mensagem_erro_api_bb"
+        )
+
+        status_valido = status in {
+            "OK",
+            "SEM_FUNDOS",
+        }
+
+        te["verificacao_manual_bb"] = not status_valido
+
+        # Se o lote já informou explicitamente verificação manual,
+        # preservamos True em caso de divergência.
+        if registro.get("verificacao_manual_bb") is True:
+            te["verificacao_manual_bb"] = True
+
+        if not status_valido:
+            te["motivo_saldo_nao_atribuido"] = (
+                "DADOS_BB_INDISPONIVEIS"
+            )
+            return
+
+        if status == "SEM_FUNDOS":
+            # Consulta válida, porém nenhum fundo foi retornado.
+            # Não inferimos saldo zero.
+            te["motivo_saldo_nao_atribuido"] = (
+                "SEM_FUNDOS"
+            )
+            return
+
+        # ----------------------------------------------------------
+        # SALDO BANCÁRIO OBSERVADO
+        # ----------------------------------------------------------
+        saldo_conta_centavos = registro.get(
+            "saldo_investimento_bb_centavos"
+        )
+
+        if saldo_conta_centavos is not None:
+            if (
+                isinstance(saldo_conta_centavos, bool)
+                or not isinstance(saldo_conta_centavos, int)
+            ):
+                raise TypeError(
+                    "saldo_investimento_bb_centavos deve ser "
+                    "int ou None."
+                )
+
+            te["saldo_investimento_bb_conta_centavos"] = (
+                saldo_conta_centavos
+            )
+
+        # Compatibilidade com formato antigo em reais.
+        if (
+            te["saldo_investimento_bb_conta_centavos"] is None
+            and registro.get("saldo_investimento_bb") is not None
+        ):
+            te["saldo_investimento_bb_conta_centavos"] = (
+                para_centavos(
+                    registro.get("saldo_investimento_bb")
+                )
+            )
+
+        # ----------------------------------------------------------
+        # BLINDAGEM CONTRA DUPLA CONTAGEM
+        # ----------------------------------------------------------
+        if compartilhada:
+            te["saldo_bb_atribuivel_te"] = False
+            te["saldo_investimento_bb_centavos"] = None
+            te["motivo_saldo_nao_atribuido"] = (
+                "CONTA_EXECUTOR_COMPARTILHADA"
+            )
+        else:
+            te["saldo_bb_atribuivel_te"] = True
+            te["saldo_investimento_bb_centavos"] = (
+                te["saldo_investimento_bb_conta_centavos"]
+            )
+            te["motivo_saldo_nao_atribuido"] = None
+
+        # Rendimentos ainda não são calculados pelo endpoint de saldo.
+        # Caso uma fonte específica os forneça, a mesma regra de
+        # atribuição deverá ser aplicada antes de colocá-los no nível TE.
+        rendimentos_centavos = registro.get(
+            "valor_rendimentos_centavos"
+        )
+
+        if rendimentos_centavos is not None:
+            if (
+                isinstance(rendimentos_centavos, bool)
+                or not isinstance(rendimentos_centavos, int)
+            ):
+                raise TypeError(
+                    "valor_rendimentos_centavos deve ser "
+                    "int ou None."
+                )
+
+            if not compartilhada:
+                te["valor_rendimentos_centavos"] = (
+                    rendimentos_centavos
+                )
+
+        if (
+            te["valor_rendimentos_centavos"] is None
+            and not compartilhada
+            and registro.get("valor_rendimentos") is not None
+        ):
+            te["valor_rendimentos_centavos"] = (
+                para_centavos(
+                    registro.get("valor_rendimentos")
+                )
+            )
 
     # ==================================================
     # SIAFI/MG
