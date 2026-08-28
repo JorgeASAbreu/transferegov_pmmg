@@ -3,6 +3,8 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Any
 
+from transferegov.transformacao.moeda import para_centavos
+
 
 class FTransferencia:
     """
@@ -11,9 +13,29 @@ class FTransferencia:
     Granularidade:
         1 linha = 1 Plano de Ação / Transferência Especial.
 
+    CONVENÇÃO MONETÁRIA OBRIGATÓRIA
+    --------------------------------
+    Todo valor monetário exposto por esta camada é representado em
+    CENTAVOS INTEIROS e usa o sufixo "_centavos".
+
+    Exemplos:
+        1          = R$ 0,01
+        100        = R$ 1,00
+        123_456    = R$ 1.234,56
+        52_735_000 = R$ 527.350,00
+
+    Regras para manutenção:
+        - NÃO usar float em cálculos monetários.
+        - NÃO usar int(valor * 100).
+        - NÃO multiplicar diretamente float por 100.
+        - Converter valores externos por meio de para_centavos(...).
+        - None significa ausência de informação e não deve ser
+          transformado automaticamente em zero.
+        - A conversão para reais pertence à camada de apresentação.
+
     Regras importantes:
 
-    1. valor_transferido:
+    1. valor_transferido_centavos:
        obtido pela cadeia federal:
        Plano de Ação -> Empenho -> Documento Hábil -> OP/OB.
 
@@ -515,21 +537,44 @@ class FTransferencia:
             ),
 
             # ==========================================
-            # VALORES
+            # VALORES MONETÁRIOS
             # ==========================================
-            "valor_destinado": (
+            #
+            # CONVENÇÃO OBRIGATÓRIA:
+            #
+            # Todo campo monetário desta camada termina em
+            # "_centavos" e armazena int ou None.
+            #
+            #     1      = R$ 0,01
+            #     100    = R$ 1,00
+            #     123456 = R$ 1.234,56
+            #
+            # Nunca interpretar esses números diretamente como
+            # valores em reais. A conversão para reais pertence
+            # exclusivamente à camada de apresentação.
+            # ==========================================
+
+            "valor_destinado_centavos": (
                 valor_destinado
             ),
 
-            "valor_custeio": plano.get(
-                "valor_custeio_plano_acao"
+            "valor_custeio_centavos": (
+                para_centavos(
+                    plano.get(
+                        "valor_custeio_plano_acao"
+                    )
+                )
             ),
 
-            "valor_investimento": plano.get(
-                "valor_investimento_plano_acao"
+            "valor_investimento_centavos": (
+                para_centavos(
+                    plano.get(
+                        "valor_investimento_plano_acao"
+                    )
+                )
             ),
 
-            "valor_transferido": (
+            "valor_transferido_centavos": (
                 valor_transferido
             ),
 
@@ -537,14 +582,22 @@ class FTransferencia:
                 "OP_OB_FEDERAL"
             ),
 
-            "valor_rendimentos": None,
-            "recursos_disponiveis": None,
+            # Dados externos ainda não incorporados.
+            # None = informação desconhecida.
+            # None NÃO significa R$ 0,00.
+            "valor_rendimentos_centavos": None,
+            "recursos_disponiveis_centavos": None,
 
-            "valor_empenhado": None,
-            "valor_liquidado": None,
-            "valor_pago": None,
+            "valor_empenhado_centavos": None,
+            "valor_liquidado_centavos": None,
+            "valor_pago_centavos": None,
 
-            "valor_a_executar": None,
+            "valor_executado_centavos": None,
+            "liquidado_a_pagar_centavos": None,
+            "saldo_financeiro_teorico_centavos": None,
+            "valor_a_executar_centavos": None,
+
+            # Percentual não é valor monetário.
             "percentual_execucao": None,
 
             # ==========================================
@@ -574,7 +627,7 @@ class FTransferencia:
 
             "data_deposito": data_deposito,
 
-            "saldo_conta": saldo_conta,
+            "saldo_conta_centavos": saldo_conta,
 
             "data_saldo": data_saldo,
 
@@ -711,23 +764,43 @@ class FTransferencia:
     @staticmethod
     def _calcular_valor_destinado(
         plano: dict[str, Any],
-    ) -> float:
-        custeio = (
-            plano.get(
-                "valor_custeio_plano_acao"
+    ) -> int:
+        """
+        Calcula o valor total destinado à Transferência Especial.
+
+        RETORNO
+        -------
+        int
+            Valor total em CENTAVOS INTEIROS.
+
+        Os componentes são convertidos para centavos antes da
+        soma. Nenhuma operação monetária utiliza float.
+
+        Nesta composição específica, parcela ausente de custeio
+        ou investimento equivale a zero para o cálculo do total.
+        """
+
+        custeio_centavos = (
+            para_centavos(
+                plano.get(
+                    "valor_custeio_plano_acao"
+                )
             )
             or 0
         )
 
-        investimento = (
-            plano.get(
-                "valor_investimento_plano_acao"
+        investimento_centavos = (
+            para_centavos(
+                plano.get(
+                    "valor_investimento_plano_acao"
+                )
             )
             or 0
         )
 
-        return float(
-            custeio + investimento
+        return (
+            custeio_centavos
+            + investimento_centavos
         )
 
     # ==================================================
@@ -736,68 +809,81 @@ class FTransferencia:
 
     @staticmethod
     def _calcular_valor_transferido_federal(
-            empenhos: list[dict[str, Any]],
-            dh_por_empenho: dict[Any, list[dict[str, Any]]],
-            op_ob_por_dh: dict[Any, list[dict[str, Any]]],
-        ) -> float:
-            """
-            Calcula o valor efetivamente transferido
-            pela cadeia federal:
+        empenhos: list[dict[str, Any]],
+        dh_por_empenho: dict[Any, list[dict[str, Any]]],
+        op_ob_por_dh: dict[Any, list[dict[str, Any]]],
+    ) -> int:
+        """
+        Calcula o valor efetivamente transferido pela cadeia federal:
 
             Plano de Ação
                 -> Empenho
                 -> Documento Hábil
                 -> OP/OB
 
-            Considera o valor_dh somente quando existe
-            pelo menos uma OP/OB vinculada ao documento hábil.
-            """
+        Considera o valor_dh somente quando existe pelo menos uma
+        OP/OB vinculada ao Documento Hábil.
 
-            total = 0.0
-            ids_dh_processados: set[Any] = set()
+        CONVENÇÃO MONETÁRIA
+        ------------------
+        O retorno está em CENTAVOS INTEIROS.
 
-            for empenho in empenhos:
-                id_empenho = empenho.get("id_empenho")
+        Cada valor_dh é convertido antes da soma. O acumulador é
+        int desde sua inicialização, impedindo propagação de float.
+        """
 
-                if id_empenho is None:
+        total = 0
+        ids_dh_processados: set[Any] = set()
+
+        for empenho in empenhos:
+            id_empenho = empenho.get("id_empenho")
+
+            if id_empenho is None:
+                continue
+
+            documentos_habeis = dh_por_empenho.get(
+                id_empenho,
+                [],
+            )
+
+            for dh in documentos_habeis:
+                id_dh = dh.get("id_dh")
+
+                if id_dh is None:
                     continue
 
-                documentos_habeis = dh_por_empenho.get(
-                    id_empenho,
+                if id_dh in ids_dh_processados:
+                    continue
+
+                movimentos = op_ob_por_dh.get(
+                    id_dh,
                     [],
                 )
 
-                for dh in documentos_habeis:
-                    id_dh = dh.get("id_dh")
+                # Sem OP/OB, o Documento Hábil não é considerado
+                # como valor efetivamente transferido.
+                if not movimentos:
+                    continue
 
-                    if id_dh is None:
-                        continue
+                valor_dh = dh.get("valor_dh")
 
-                    if id_dh in ids_dh_processados:
-                        continue
+                if valor_dh is None:
+                    continue
 
-                    movimentos = op_ob_por_dh.get(
-                        id_dh,
-                        [],
-                    )
+                valor_dh_centavos = para_centavos(
+                    valor_dh
+                )
 
-                    # Sem OP/OB não consideramos
-                    # o valor como efetivamente transferido.
-                    if not movimentos:
-                        continue
+                if valor_dh_centavos is None:
+                    continue
 
-                    valor_dh = dh.get("valor_dh")
+                total += valor_dh_centavos
 
-                    if valor_dh is None:
-                        continue
+                ids_dh_processados.add(
+                    id_dh
+                )
 
-                    total += float(valor_dh)
-
-                    ids_dh_processados.add(
-                        id_dh
-                    )
-
-            return total
+        return total
 
     # ==================================================
     # SALDO
@@ -833,7 +919,22 @@ class FTransferencia:
     def _obter_saldo_mais_recente(
         self,
         saldos: list[dict[str, Any]],
-    ) -> float | None:
+    ) -> int | None:
+        """
+        Obtém o saldo mais recente conhecido da conta.
+
+        RETORNO
+        -------
+        int | None
+            Saldo em CENTAVOS INTEIROS.
+
+        Exemplos:
+            R$ 0,09     -> 9
+            R$ 1.234,56 -> 123_456
+
+        None significa ausência de informação e jamais deve ser
+        interpretado automaticamente como saldo zero.
+        """
         saldo = self._saldo_mais_recente(
             saldos
         )
@@ -848,7 +949,7 @@ class FTransferencia:
         if valor is None:
             return None
 
-        return float(valor)
+        return para_centavos(valor)
 
     def _obter_data_saldo_mais_recente(
         self,

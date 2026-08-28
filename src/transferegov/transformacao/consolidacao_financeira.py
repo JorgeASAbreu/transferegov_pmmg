@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from decimal import Decimal
 from typing import Any
+
+from transferegov.transformacao.moeda import para_centavos
 
 
 class ConsolidacaoFinanceira:
     """
-    Enriquece a f_transferencia com informações financeiras
-    provenientes de fontes externas ao Transferegov.
+    Enriquece a f_transferencia com informações financeiras provenientes
+    de fontes externas ao Transferegov.
 
     Granularidade:
         1 linha = 1 Plano de Ação / Transferência Especial.
@@ -17,10 +20,55 @@ class ConsolidacaoFinanceira:
         - Banco do Brasil
         - SIAFI/MG
 
-    Regra fundamental:
-        ausência de informação != zero.
+    CONVENÇÃO MONETÁRIA OBRIGATÓRIA
+    --------------------------------
+    A camada analítica trabalha exclusivamente com valores monetários
+    representados em CENTAVOS INTEIROS.
 
-    Portanto, valores ainda não obtidos permanecem como None.
+    Exemplos:
+        1          = R$ 0,01
+        100        = R$ 1,00
+        123_456    = R$ 1.234,56
+        52_735_000 = R$ 527.350,00
+
+    Todo campo monetário analítico deve:
+        - terminar com o sufixo "_centavos";
+        - conter int ou None;
+        - jamais conter float.
+
+    REGRA FUNDAMENTAL
+    -----------------
+    ausência de informação != zero.
+
+    Portanto:
+        None significa "não conhecido / não disponível";
+        0 significa um valor monetário conhecido igual a R$ 0,00.
+
+    MANUTENÇÃO
+    ----------
+    - NÃO usar float em cálculos monetários.
+    - NÃO usar int(valor * 100).
+    - NÃO fazer multiplicações manuais por 100.
+    - Valores externos em reais devem entrar por para_centavos(...).
+    - Operações entre valores já convertidos são feitas diretamente
+      com inteiros.
+    - A conversão de centavos para reais pertence à apresentação.
+    - Percentuais não são valores monetários e são calculados com
+      Decimal para evitar propagação desnecessária de float.
+
+    CONTRATO DAS FONTES EXTERNAS
+    ----------------------------
+    dados_bb e dados_siafi podem, nesta etapa da arquitetura, entregar
+    valores em reais usando os nomes originais das fontes, por exemplo:
+
+        valor_rendimentos
+        saldo_investimento_bb
+        valor_empenhado
+        valor_liquidado
+        valor_pago
+
+    Esta classe é a fronteira responsável por converter esses valores
+    para o padrão analítico em centavos.
     """
 
     def __init__(
@@ -37,9 +85,10 @@ class ConsolidacaoFinanceira:
         """
         Retorna uma nova lista, preservando a lista original.
 
-        Nesta primeira versão, BB e SIAFI podem estar ausentes.
-        """
+        BB e SIAFI podem estar ausentes.
 
+        A ausência dessas fontes não deve produzir zeros artificiais.
+        """
         resultado = deepcopy(self.transferencias)
 
         indice_bb = self._criar_indice_bb()
@@ -68,9 +117,9 @@ class ConsolidacaoFinanceira:
         self,
     ) -> dict[str, dict[str, Any]]:
         """
-        Indexa dados BB por agência/conta.
+        Indexa dados do Banco do Brasil por agência/conta.
 
-        Estrutura futura esperada:
+        Estrutura esperada nesta fronteira:
 
         {
             "id_agencia_conta": "1615-27418",
@@ -78,8 +127,10 @@ class ConsolidacaoFinanceira:
             "valor_rendimentos": 456.78,
             "data_consulta_bb": "2026-08-27"
         }
-        """
 
+        Os valores monetários acima ainda estão expressos em reais.
+        A conversão para centavos ocorre em _aplicar_bb().
+        """
         indice: dict[str, dict[str, Any]] = {}
 
         for registro in self.dados_bb:
@@ -94,12 +145,22 @@ class ConsolidacaoFinanceira:
         self,
     ) -> dict[Any, dict[str, Any]]:
         """
-        Indexa dados SIAFI pelo id_plano_acao.
+        Indexa dados SIAFI/MG pelo id_plano_acao.
 
-        Esta chave poderá ser alterada futuramente caso
-        a integração estadual utilize outra chave de ligação.
+        Estrutura monetária esperada nesta fronteira:
+
+        {
+            "id_plano_acao": 92176,
+            "valor_empenhado": 400000.00,
+            "valor_liquidado": 250000.00,
+            "valor_pago": 200000.00
+        }
+
+        Esses valores são convertidos para centavos em _aplicar_siafi().
+
+        A chave poderá ser alterada futuramente caso a integração
+        estadual utilize outra chave de ligação.
         """
-
         indice: dict[Any, dict[str, Any]] = {}
 
         for registro in self.dados_siafi:
@@ -119,11 +180,20 @@ class ConsolidacaoFinanceira:
         te: dict[str, Any],
         indice_bb: dict[str, dict[str, Any]],
     ) -> None:
+        """
+        Incorpora dados bancários à transferência.
+
+        Todos os valores monetários são convertidos para centavos
+        antes de entrarem no modelo analítico.
+        """
         chave = te.get("id_agencia_conta")
 
-        # Campos explícitos para diferenciar:
-        # "não consultado" de saldo zero.
-        te["saldo_investimento_bb"] = None
+        # Inicialização explícita.
+        #
+        # None significa "informação não disponível".
+        # Nunca substituir None por zero apenas para facilitar cálculo.
+        te["saldo_investimento_bb_centavos"] = None
+        te["valor_rendimentos_centavos"] = None
         te["data_consulta_bb"] = None
         te["status_dados_bb"] = "NAO_DISPONIVEL"
 
@@ -136,12 +206,12 @@ class ConsolidacaoFinanceira:
         if registro is None:
             return
 
-        te["saldo_investimento_bb"] = registro.get(
-            "saldo_investimento_bb"
+        te["saldo_investimento_bb_centavos"] = para_centavos(
+            registro.get("saldo_investimento_bb")
         )
 
-        te["valor_rendimentos"] = registro.get(
-            "valor_rendimentos"
+        te["valor_rendimentos_centavos"] = para_centavos(
+            registro.get("valor_rendimentos")
         )
 
         te["data_consulta_bb"] = registro.get(
@@ -159,6 +229,18 @@ class ConsolidacaoFinanceira:
         te: dict[str, Any],
         indice_siafi: dict[Any, dict[str, Any]],
     ) -> None:
+        """
+        Incorpora execução orçamentária/financeira estadual.
+
+        Regra de negócio do projeto:
+            valor executado = valor liquidado.
+
+        Todos os valores monetários entram na camada analítica em
+        centavos inteiros.
+        """
+        te["valor_empenhado_centavos"] = None
+        te["valor_liquidado_centavos"] = None
+        te["valor_pago_centavos"] = None
         te["status_dados_siafi"] = "NAO_DISPONIVEL"
 
         id_plano_acao = te.get("id_plano_acao")
@@ -168,16 +250,16 @@ class ConsolidacaoFinanceira:
         if registro is None:
             return
 
-        te["valor_empenhado"] = registro.get(
-            "valor_empenhado"
+        te["valor_empenhado_centavos"] = para_centavos(
+            registro.get("valor_empenhado")
         )
 
-        te["valor_liquidado"] = registro.get(
-            "valor_liquidado"
+        te["valor_liquidado_centavos"] = para_centavos(
+            registro.get("valor_liquidado")
         )
 
-        te["valor_pago"] = registro.get(
-            "valor_pago"
+        te["valor_pago_centavos"] = para_centavos(
+            registro.get("valor_pago")
         )
 
         te["status_dados_siafi"] = "DISPONIVEL"
@@ -190,38 +272,73 @@ class ConsolidacaoFinanceira:
     def _calcular_indicadores_financeiros(
         te: dict[str, Any],
     ) -> None:
-        valor_transferido = te.get(
-            "valor_transferido"
+        """
+        Calcula os indicadores financeiros derivados.
+
+        Todas as operações monetárias abaixo usam apenas int.
+
+        Fórmulas:
+            recursos_disponiveis
+                = valor_transferido + valor_rendimentos
+
+            valor_executado
+                = valor_liquidado
+
+            liquidado_a_pagar
+                = valor_liquidado - valor_pago
+
+            saldo_financeiro_teorico
+                = recursos_disponiveis - valor_pago
+
+            valor_a_executar
+                = recursos_disponiveis - valor_liquidado
+
+            percentual_execucao
+                = valor_liquidado / recursos_disponiveis
+
+        Identidade de consistência:
+            saldo_financeiro_teorico - valor_a_executar
+                = liquidado_a_pagar
+
+        A identidade somente pode ser verificada quando todos os
+        componentes necessários estão disponíveis.
+        """
+        valor_transferido_centavos = te.get(
+            "valor_transferido_centavos"
         )
 
-        valor_rendimentos = te.get(
-            "valor_rendimentos"
+        valor_rendimentos_centavos = te.get(
+            "valor_rendimentos_centavos"
         )
 
-        valor_liquidado = te.get(
-            "valor_liquidado"
+        valor_liquidado_centavos = te.get(
+            "valor_liquidado_centavos"
+        )
+
+        valor_pago_centavos = te.get(
+            "valor_pago_centavos"
         )
 
         # ----------------------------------------------
         # Recursos disponíveis
         # ----------------------------------------------
         #
-        # Enquanto não conhecemos os rendimentos,
+        # Enquanto os rendimentos forem desconhecidos,
         # não afirmamos o total disponível.
         #
         if (
-            valor_transferido is not None
-            and valor_rendimentos is not None
+            valor_transferido_centavos is not None
+            and valor_rendimentos_centavos is not None
         ):
-            recursos_disponiveis = (
-                float(valor_transferido)
-                + float(valor_rendimentos)
+            recursos_disponiveis_centavos = (
+                valor_transferido_centavos
+                + valor_rendimentos_centavos
             )
         else:
-            recursos_disponiveis = None
+            recursos_disponiveis_centavos = None
 
-        te["recursos_disponiveis"] = (
-            recursos_disponiveis
+        te["recursos_disponiveis_centavos"] = (
+            recursos_disponiveis_centavos
         )
 
         # ----------------------------------------------
@@ -231,40 +348,125 @@ class ConsolidacaoFinanceira:
         # Regra de negócio:
         # execução = liquidação.
         #
-        if valor_liquidado is not None:
-            valor_executado = float(
-                valor_liquidado
+        valor_executado_centavos = (
+            valor_liquidado_centavos
+            if valor_liquidado_centavos is not None
+            else None
+        )
+
+        te["valor_executado_centavos"] = (
+            valor_executado_centavos
+        )
+
+        # ----------------------------------------------
+        # Liquidado a pagar
+        # ----------------------------------------------
+        if (
+            valor_liquidado_centavos is not None
+            and valor_pago_centavos is not None
+        ):
+            liquidado_a_pagar_centavos = (
+                valor_liquidado_centavos
+                - valor_pago_centavos
             )
         else:
-            valor_executado = None
+            liquidado_a_pagar_centavos = None
 
-        te["valor_executado"] = valor_executado
+        te["liquidado_a_pagar_centavos"] = (
+            liquidado_a_pagar_centavos
+        )
+
+        # ----------------------------------------------
+        # Saldo financeiro teórico
+        # ----------------------------------------------
+        #
+        # Este campo representa uma inferência contábil/financeira:
+        #
+        # recursos disponíveis - pagamentos estaduais.
+        #
+        # Ele NÃO deve ser confundido com saldo bancário observado.
+        #
+        if (
+            recursos_disponiveis_centavos is not None
+            and valor_pago_centavos is not None
+        ):
+            saldo_financeiro_teorico_centavos = (
+                recursos_disponiveis_centavos
+                - valor_pago_centavos
+            )
+        else:
+            saldo_financeiro_teorico_centavos = None
+
+        te["saldo_financeiro_teorico_centavos"] = (
+            saldo_financeiro_teorico_centavos
+        )
 
         # ----------------------------------------------
         # Valor a executar
         # ----------------------------------------------
+        #
+        # Perspectiva da execução:
+        # recursos disponíveis que ainda não foram liquidados.
+        #
         if (
-            recursos_disponiveis is not None
-            and valor_executado is not None
+            recursos_disponiveis_centavos is not None
+            and valor_executado_centavos is not None
         ):
-            te["valor_a_executar"] = (
-                recursos_disponiveis
-                - valor_executado
+            valor_a_executar_centavos = (
+                recursos_disponiveis_centavos
+                - valor_executado_centavos
             )
         else:
-            te["valor_a_executar"] = None
+            valor_a_executar_centavos = None
+
+        te["valor_a_executar_centavos"] = (
+            valor_a_executar_centavos
+        )
 
         # ----------------------------------------------
         # Percentual de execução
         # ----------------------------------------------
+        #
+        # Percentual não é dinheiro.
+        #
+        # Usamos Decimal para evitar o retorno automático a float.
+        # O valor permanece como razão:
+        #
+        #     0.50 = 50%
+        #
+        # A formatação percentual pertence à apresentação.
+        #
         if (
-            recursos_disponiveis is not None
-            and recursos_disponiveis != 0
-            and valor_executado is not None
+            recursos_disponiveis_centavos is not None
+            and recursos_disponiveis_centavos != 0
+            and valor_executado_centavos is not None
         ):
             te["percentual_execucao"] = (
-                valor_executado
-                / recursos_disponiveis
+                Decimal(valor_executado_centavos)
+                / Decimal(recursos_disponiveis_centavos)
             )
         else:
             te["percentual_execucao"] = None
+
+        # ----------------------------------------------
+        # Verificação interna de consistência
+        # ----------------------------------------------
+        #
+        # Não classifica irregularidade.
+        # Apenas verifica uma identidade matemática entre os
+        # indicadores calculados por esta própria classe.
+        #
+        if (
+            saldo_financeiro_teorico_centavos is not None
+            and valor_a_executar_centavos is not None
+            and liquidado_a_pagar_centavos is not None
+        ):
+            te["consistencia_financeira_interna"] = (
+                (
+                    saldo_financeiro_teorico_centavos
+                    - valor_a_executar_centavos
+                )
+                == liquidado_a_pagar_centavos
+            )
+        else:
+            te["consistencia_financeira_interna"] = None
