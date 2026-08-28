@@ -40,3 +40,5 @@ logs/
 # ============================================================
 .vscode/
 .idea/
+# Certificados compactados
+certificados.zip
