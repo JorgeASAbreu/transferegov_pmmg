@@ -5,13 +5,7 @@ from typing import Any
 import requests
 
 from .autenticacao import AutenticacaoBB
-from .config import (
-    BB_APP_KEY,
-    BB_CERT_PATH,
-    BB_FUNDOS_BASE_URL,
-    BB_KEY_PATH,
-    BB_TIMEOUT,
-)
+from .config import carregar_configuracao_bb
 
 
 class ErroAPIInvestimentosBB(RuntimeError):
@@ -80,6 +74,10 @@ class APIInvestimentosBB:
     - não enviar dígito verificador na URL;
     - reutilizar um token OAuth2 em processamento em lote.
 
+    A configuração sensível do BB é carregada somente quando uma chamada
+    HTTP real é executada. Assim, simples imports e testes com mocks não
+    exigem credenciais ou certificados no ambiente.
+
     Este cliente retorna o JSON bruto do BB.
     A transformação para centavos pertence à camada de integração/lote.
     """
@@ -114,8 +112,10 @@ class APIInvestimentosBB:
         if not token_normalizado:
             raise ValueError("Token OAuth2 não pode ser vazio.")
 
+        config = carregar_configuracao_bb()
+
         url = (
-            f"{BB_FUNDOS_BASE_URL}"
+            f"{config.fundos_base_url}"
             f"/saldo/agencia/{agencia_formatada}"
             f"/conta/{conta_formatada}"
         )
@@ -126,7 +126,7 @@ class APIInvestimentosBB:
         }
 
         params = {
-            "gw-dev-app-key": BB_APP_KEY,
+            "gw-dev-app-key": config.app_key,
         }
 
         try:
@@ -135,10 +135,10 @@ class APIInvestimentosBB:
                 headers=headers,
                 params=params,
                 cert=(
-                    str(BB_CERT_PATH),
-                    str(BB_KEY_PATH),
+                    str(config.cert_path),
+                    str(config.key_path),
                 ),
-                timeout=BB_TIMEOUT,
+                timeout=config.timeout,
             )
 
         except requests.RequestException as erro:

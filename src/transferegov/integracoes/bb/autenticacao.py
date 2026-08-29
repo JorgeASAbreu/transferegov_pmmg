@@ -2,52 +2,49 @@ from __future__ import annotations
 
 import requests
 
-from .config import (
-    BB_CERT_PATH,
-    BB_CLIENT_ID,
-    BB_CLIENT_SECRET,
-    BB_FUNDOS_SCOPE,
-    BB_KEY_PATH,
-    BB_TIMEOUT,
-    BB_TOKEN_URL,
-)
+from .config import carregar_configuracao_bb
 
 
 class AutenticacaoBB:
+    """
+    Responsável por obter token OAuth do Banco do Brasil.
+
+    A configuração é carregada apenas no momento da autenticação real,
+    evitando dependência de credenciais durante simples imports ou testes
+    unitários com mocks.
+    """
+
     def obter_token(self) -> str:
+        config = carregar_configuracao_bb()
+
         headers = {
-            "Content-Type": (
-                "application/x-www-form-urlencoded"
-            ),
+            "Content-Type": "application/x-www-form-urlencoded",
         }
 
         data = {
             "grant_type": "client_credentials",
-            "scope": BB_FUNDOS_SCOPE,
+            "scope": config.fundos_scope,
         }
 
         resposta = requests.post(
-            BB_TOKEN_URL,
+            config.token_url,
             headers=headers,
             data=data,
             auth=(
-                BB_CLIENT_ID,
-                BB_CLIENT_SECRET,
+                config.client_id,
+                config.client_secret,
             ),
             cert=(
-                str(BB_CERT_PATH),
-                str(BB_KEY_PATH),
+                str(config.cert_path),
+                str(config.key_path),
             ),
-            timeout=BB_TIMEOUT,
+            timeout=config.timeout,
         )
 
         resposta.raise_for_status()
 
         dados = resposta.json()
-
-        token = dados.get(
-            "access_token"
-        )
+        token = dados.get("access_token")
 
         if not token:
             raise RuntimeError(
