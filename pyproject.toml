@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "transferegov-pmmg"
+version = "0.5.1"
+description = "Integração e análise de Transferências Especiais da PMMG"
+readme = "README.md"
+requires-python = ">=3.12"
+
+dependencies = [
+    "requests",
+    "psycopg[binary]",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
