@@ -42,3 +42,4 @@ logs/
 .idea/
 # Certificados compactados
 certificados.zip
+*.egg-info/
